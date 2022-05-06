@@ -12,15 +12,16 @@ on:
     tags:
     - "*"  # run for tags
 
+env:
+  GROUP: weaveworksdemos 
+  COMMIT: ${{ github.sha }}
+  REPO: front-end    
+      
 jobs:
   test:
     runs-on: ubuntu-latest
-    env:
-      GROUP: weaveworksdemos 
-      COMMIT: ${{ github.sha }}
-      REPO: front-end
     steps:
-    - uses: actions/checkout@v2
+    - uses: actions/checkout@v3
 
     #
     #
@@ -42,35 +43,49 @@ jobs:
         DOCKER_BUILDKIT: 1
       run: make test
 
-    #
-    #
-    # Build docker image for service
-    - name: Build docker image
-      uses: docker/build-push-action@v1
-      with:
-        push: false
-        repository: ${{ env.GROUP }}/${{ env.REPO }}
-        tag_with_ref: true
-        tag_with_sha: true
-        tags: ${{ github.sha }}
+  # Push image to GitHub Packages.
+  # See also https://docs.docker.com/docker-hub/builds/
+  push:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    
+    steps:      
+      - name: "Set environmental variables"
+        run: |
+          echo "IMAGE_NAME=${{ env.GROUP }}/${{ env.REPO }}" >> $GITHUB_ENV
+      
+      - uses: actions/checkout@v3          
+          
+      - name: Build image
+        run: docker build . --file Dockerfile --tag $IMAGE_NAME:${{ github.sha }} --label "runnumber=${GITHUB_RUN_ID}"  
+      #
+      #
+      # Run simple test against built container
+      - name: Test docker image
+        env:
+          DOCKER_BUILDKIT: 1
+        run: ./test/container.sh
 
-    #
-    #
-    # Run simple test against built container
-    - name: Test docker image
-      env:
-        DOCKER_BUILDKIT: 1
-      run: ./test/container.sh
+      - name: Log in to registry
+        # This is where you will update the PAT to GITHUB_TOKEN
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u $ --password-stdin
 
-    #
-    #
-    # Push to dockerhub
-    - name: Push to Docker Hub
-      uses: docker/build-push-action@v1
-      if: startsWith(github.ref, 'refs/tags/v') || github.ref == 'refs/heads/master'
-      with:
-        username: ${{ secrets.DOCKER_USER }}
-        password: ${{ secrets.DOCKER_PASS }}
-        repository: ${{ env.GROUP }}/${{ env.REPO }}
-        tag_with_ref: true
-        tag_with_sha: true
+      - name: Push image
+        run: |
+          IMAGE_ID=ghcr.io/${{ github.repository_owner }}/$IMAGE_NAME
+
+          # Change all uppercase to lowercase
+          IMAGE_ID=$(echo $IMAGE_ID | tr '[A-Z]' '[a-z]')
+          # Strip git ref prefix from version
+          VERSION=$(echo "${{ github.ref }}" | sed -e 's,.*/\(.*\),\1,')
+          # Strip "v" prefix from tag name
+          [[ "${{ github.ref }}" == "refs/tags/"* ]] && VERSION=$(echo $VERSION | sed -e 's/^v//')
+          # Use Docker `latest` tag convention
+          [ "$VERSION" == "master" ] && VERSION=latest
+          echo IMAGE_ID=$IMAGE_ID
+          echo VERSION=$VERSION
+          docker tag $IMAGE_NAME:${{ github.sha }} $IMAGE_ID:$VERSION
+          docker push $IMAGE_ID:$VERSION
